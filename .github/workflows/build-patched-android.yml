@@ -23,130 +23,22 @@ jobs:
 
     steps:
       # ============================================================
-      # CLEAN DEEP STUDENT 0.9.62 BASELINE
+      # CURRENT PATCHED SOURCE
       # ============================================================
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: 840a578b2f38ac71541aad688cb610f160638fe1
 
-      # ============================================================
-      # 0.9.62 FSRS COMPILE FIX
-      #
-      # The clean release commit is missing the newly-required
-      # learn_ahead_minutes field in FsrsSchedulerConfigUpdate.
-      # The upstream post-release fix sets it to None.
-      # ============================================================
-      - name: Patch FSRS compile mismatch
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path(
-              "src-tauri/src/chat_v2/tools/fsrs_settings_executor.rs"
-          )
-
-          source = path.read_text(encoding="utf-8")
-
-          old = (
-              "        let update = FsrsSchedulerConfigUpdate {\n"
-              "            new_per_day: request.new_per_day,"
-          )
-
-          new = (
-              "        let update = FsrsSchedulerConfigUpdate {\n"
-              "            learn_ahead_minutes: None,\n"
-              "            new_per_day: request.new_per_day,"
-          )
-
-          if old not in source:
-              if new in source:
-                  print("FSRS compile fix already present")
-              else:
-                  raise SystemExit(
-                      "FSRS patch failed: expected initializer not found"
-                  )
-          else:
-              source = source.replace(old, new, 1)
-
-              path.write_text(
-                  source,
-                  encoding="utf-8",
-              )
-
-              print("FSRS compile fix applied successfully")
-          PY
-
-      - name: Verify FSRS compile fix
+      - name: Verify source fixes
         run: |
           grep -Fq \
             'learn_ahead_minutes: None,' \
             src-tauri/src/chat_v2/tools/fsrs_settings_executor.rs
-
-          echo "FSRS compile fix verified"
-
-      # ============================================================
-      # ANDROID TEXTBOX / IME FIX
-      # ============================================================
-      - name: Patch Android composer IME bug
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path(
-              "src/features/chat/components/input-bar/ComposerTextarea.tsx"
-          )
-
-          source = path.read_text(encoding="utf-8")
-
-          pattern = re.compile(
-              r'if\s*\(\s*!isComposingRef\.current\s*\|\|\s*!isMobile\s*\)'
-              r'\s*\{\s*'
-              r'onInputChange\(e\.target\.value\);'
-              r'\s*\}',
-              re.MULTILINE,
-          )
-
-          replacement = """if (!isComposingRef.current || !isMobile || /Android/i.test(navigator.userAgent)) {
-              onInputChange(e.target.value);
-            }"""
-
-          patched, count = pattern.subn(
-              replacement,
-              source,
-              count=1,
-          )
-
-          if count != 1:
-              if (
-                  "!isMobile || /Android/i.test(navigator.userAgent)"
-                  in source
-              ):
-                  print("Android IME patch already present")
-              else:
-                  raise SystemExit(
-                      f"Android IME patch failed: expected 1 block, found {count}"
-                  )
-          else:
-              path.write_text(
-                  patched,
-                  encoding="utf-8",
-              )
-
-              print(
-                  "Android IME textbox patch applied successfully"
-              )
-          PY
-
-      - name: Verify Android textbox patch
-        run: |
           grep -Fq \
-            '!isMobile || /Android/i.test(navigator.userAgent)' \
+            'const useAndroidImeDomValue = isAndroidWebView();' \
             src/features/chat/components/input-bar/ComposerTextarea.tsx
-
-          echo "Android textbox patch verified"
+          echo "Committed Android and FSRS fixes verified"
 
       # ============================================================
       # BUILD ENVIRONMENT
