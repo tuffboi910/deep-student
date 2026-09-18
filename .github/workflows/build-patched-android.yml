@@ -18,6 +18,7 @@ jobs:
       CARGO_PROFILE_RELEASE_OPT_LEVEL: "z"
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
       CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS: "-C link-arg=-Wl,-z,max-page-size=16384"
       GRADLE_OPTS: -Dorg.gradle.daemon=false
 
     steps:
@@ -542,6 +543,53 @@ jobs:
               --locked \
               --no-default-features \
               --features mobile-slim
+
+      # ============================================================
+      # ANDROID 16 KB PAGE-SIZE COMPATIBILITY
+      # ============================================================
+      - name: Verify native 16 KB page alignment
+        run: |
+          UNSIGNED_APK=$(
+            find \\
+              src-tauri/gen/android \\
+              -name "*-unsigned.apk" \\
+              -type f \\
+              | head -1
+          )
+
+          test -n "$UNSIGNED_APK" || {
+            echo "Unsigned APK not found"
+            exit 1
+          }
+
+          NATIVE_SO="/tmp/libdeep_student_lib.so"
+
+          unzip -p \\
+            "$UNSIGNED_APK" \\
+            "lib/arm64-v8a/libdeep_student_lib.so" \\
+            > "$NATIVE_SO"
+
+          test -s "$NATIVE_SO" || {
+            echo "Deep Student native library could not be extracted"
+            exit 1
+          }
+
+          LOAD_ALIGNMENTS=$(
+            readelf -lW "$NATIVE_SO" \\
+              | awk '$1 == "LOAD" {print $NF}'
+          )
+
+          echo "Native LOAD alignments:"
+          echo "$LOAD_ALIGNMENTS"
+
+          if echo "$LOAD_ALIGNMENTS" \\
+            | grep -vxq '0x4000'
+          then
+            echo "Native library is not 16 KB page compatible"
+            exit 1
+          fi
+
+          echo "16 KB native page alignment verified"
 
       # ============================================================
       # SIGN APK
