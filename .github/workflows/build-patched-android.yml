@@ -49,13 +49,13 @@ jobs:
           source = path.read_text(encoding="utf-8")
 
           old = (
-              "        let update = FsrsSchedulerConfigUpdate {\\n"
+              "        let update = FsrsSchedulerConfigUpdate {\n"
               "            new_per_day: request.new_per_day,"
           )
 
           new = (
-              "        let update = FsrsSchedulerConfigUpdate {\\n"
-              "            learn_ahead_minutes: None,\\n"
+              "        let update = FsrsSchedulerConfigUpdate {\n"
+              "            learn_ahead_minutes: None,\n"
               "            new_per_day: request.new_per_day,"
           )
 
