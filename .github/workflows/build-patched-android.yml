@@ -41,7 +41,6 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
           path = Path(
               "src-tauri/src/chat_v2/tools/fsrs_settings_executor.rs"
@@ -49,35 +48,22 @@ jobs:
 
           source = path.read_text(encoding="utf-8")
 
-          pattern = re.compile(
-              r"(?P<open>^[ ]*let update = FsrsSchedulerConfigUpdate \\{\\n)"
-              r"(?P<body>(?:^[ ]+.*\\n)*?)"
-              r"(?P<close>^[ ]*\\};)",
-              re.MULTILINE,
-          )
+          old = """        let update = FsrsSchedulerConfigUpdate {
+              new_per_day: request.new_per_day,"""
 
-          match = pattern.search(source)
+          new = """        let update = FsrsSchedulerConfigUpdate {
+              learn_ahead_minutes: None,
+              new_per_day: request.new_per_day,"""
 
-          if match is None:
-              raise SystemExit(
-                  "FSRS patch failed: expected initializer not found"
-              )
-
-          if "learn_ahead_minutes:" in match.group("body"):
-              if "learn_ahead_minutes: None," not in match.group("body"):
+          if old not in source:
+              if new in source:
+                  print("FSRS compile fix already present")
+              else:
                   raise SystemExit(
-                      "FSRS patch failed: learn_ahead_minutes has an unexpected value"
+                      "FSRS patch failed: expected initializer not found"
                   )
-              print("FSRS compile fix already present")
           else:
-              indent = re.match(r"^[ ]*", match.group("open")).group(0)
-              replacement = (
-                  match.group("open")
-                  + f"{indent}    learn_ahead_minutes: None,\\n"
-                  + match.group("body")
-                  + match.group("close")
-              )
-              source = source[:match.start()] + replacement + source[match.end():]
+              source = source.replace(old, new, 1)
 
               path.write_text(
                   source,
