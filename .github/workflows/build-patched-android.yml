@@ -41,6 +41,7 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           path = Path(
               "src-tauri/src/chat_v2/tools/fsrs_settings_executor.rs"
@@ -48,22 +49,35 @@ jobs:
 
           source = path.read_text(encoding="utf-8")
 
-          old = """        let update = FsrsSchedulerConfigUpdate {
-              new_per_day: request.new_per_day,"""
+          pattern = re.compile(
+              r"(?P<open>^[ ]*let update = FsrsSchedulerConfigUpdate \\{\\n)"
+              r"(?P<body>(?:^[ ]+.*\\n)*?)"
+              r"(?P<close>^[ ]*\\};)",
+              re.MULTILINE,
+          )
 
-          new = """        let update = FsrsSchedulerConfigUpdate {
-              learn_ahead_minutes: None,
-              new_per_day: request.new_per_day,"""
+          match = pattern.search(source)
 
-          if old not in source:
-              if "learn_ahead_minutes: None," in source:
-                  print("FSRS compile fix already present")
-              else:
+          if match is None:
+              raise SystemExit(
+                  "FSRS patch failed: expected initializer not found"
+              )
+
+          if "learn_ahead_minutes:" in match.group("body"):
+              if "learn_ahead_minutes: None," not in match.group("body"):
                   raise SystemExit(
-                      "FSRS patch failed: expected initializer not found"
+                      "FSRS patch failed: learn_ahead_minutes has an unexpected value"
                   )
+              print("FSRS compile fix already present")
           else:
-              source = source.replace(old, new, 1)
+              indent = re.match(r"^[ ]*", match.group("open")).group(0)
+              replacement = (
+                  match.group("open")
+                  + f"{indent}    learn_ahead_minutes: None,\\n"
+                  + match.group("body")
+                  + match.group("close")
+              )
+              source = source[:match.start()] + replacement + source[match.end():]
 
               path.write_text(
                   source,
