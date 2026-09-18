@@ -33,6 +33,7 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           path = Path(
               "src/features/chat/components/input-bar/ComposerTextarea.tsx"
@@ -40,56 +41,46 @@ jobs:
 
           source = path.read_text(encoding="utf-8")
 
-          import_anchor = "import { cn } from '@/lib/utils';\n"
-          android_import = "import { isAndroid } from '@/utils/platform';\n"
+          pattern = re.compile(
+              r'if\s*\(\s*!isComposingRef\.current\s*\|\|\s*!isMobile\s*\)'
+              r'\s*\{\s*'
+              r'onInputChange\(e\.target\.value\);'
+              r'\s*\}',
+              re.MULTILINE,
+          )
 
-          if android_import not in source:
-              if import_anchor not in source:
-                  raise SystemExit(
-                      "Could not find ComposerTextarea import anchor"
-                  )
-
-              source = source.replace(
-                  import_anchor,
-                  import_anchor + android_import,
-                  1,
-              )
-
-          old = """            if (!isComposingRef.current || !isMobile) {
+          replacement = """if (!isComposingRef.current || !isMobile || /Android/i.test(navigator.userAgent)) {
               onInputChange(e.target.value);
             }"""
 
-          new = """            if (!isComposingRef.current || !isMobile || isAndroid()) {
-              onInputChange(e.target.value);
-            }"""
+          patched, count = pattern.subn(
+              replacement,
+              source,
+              count=1,
+          )
 
-          if old in source:
-              source = source.replace(old, new, 1)
-
-          elif new in source:
-              print("Android IME patch already present")
-
-          else:
+          if count != 1:
               raise SystemExit(
-                  "Expected ComposerTextarea IME block was not found"
+                  f"Android IME patch failed: expected 1 block, found {count}"
               )
 
-          path.write_text(source, encoding="utf-8")
+          path.write_text(
+              patched,
+              encoding="utf-8",
+          )
 
-          print("Android composer IME patch applied")
+          print(
+              "Android IME textbox patch applied successfully"
+          )
           PY
 
       - name: Verify Android textbox patch
         run: |
-          grep -q \
-            "import { isAndroid } from '@/utils/platform';" \
+          grep -Fq \
+            '!isMobile || /Android/i.test(navigator.userAgent)' \
             src/features/chat/components/input-bar/ComposerTextarea.tsx
 
-          grep -q \
-            "if (!isComposingRef.current || !isMobile || isAndroid())" \
-            src/features/chat/components/input-bar/ComposerTextarea.tsx
-
-          echo "✅ Android textbox patch verified"
+          echo "Android textbox patch verified"
 
       # ============================================================
       # BUILD ENVIRONMENT
@@ -112,7 +103,9 @@ jobs:
             /opt/hostedtoolcache/Python \
             /opt/hostedtoolcache/Ruby || true
 
-          sudo docker image prune --all --force || true
+          sudo docker image prune \
+            --all \
+            --force || true
 
           echo "=== AFTER ==="
           df -h /
@@ -122,13 +115,18 @@ jobs:
           if swapon --show --noheadings | grep -q .; then
             echo "Swap already enabled"
           else
-            sudo fallocate -l 12G /swapfile || \
-              sudo dd if=/dev/zero of=/swapfile \
-              bs=1M count=12288 status=progress
+            sudo fallocate \
+              -l 12G \
+              /swapfile || \
+            sudo dd \
+              if=/dev/zero \
+              of=/swapfile \
+              bs=1M \
+              count=12288 \
+              status=progress
 
             sudo chmod 600 /swapfile
             sudo mkswap /swapfile
-
             sudo swapon /swapfile || true
           fi
 
@@ -149,7 +147,8 @@ jobs:
 
       - name: Setup Android SDK
         run: |
-          yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" \
+          yes | \
+            "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" \
             "ndk;27.0.12077973" \
             "build-tools;35.0.0" \
             "platforms;android-35"
@@ -180,25 +179,31 @@ jobs:
       # DEPENDENCIES
       # ============================================================
       - name: Install dependencies
-        run: npm ci --legacy-peer-deps
+        run: |
+          npm ci --legacy-peer-deps
 
       - name: Refresh Cargo metadata
         run: |
           cd src-tauri
-          cargo metadata --format-version 1 > /dev/null
+          cargo metadata \
+            --format-version 1 \
+            > /dev/null
           cd ..
 
       - name: Generate third-party notices
-        run: npm run licenses:generate
+        run: |
+          npm run licenses:generate
 
       - name: Generate version information
-        run: node scripts/generate-version.mjs
+        run: |
+          node scripts/generate-version.mjs
 
       # ============================================================
       # ANDROID PROJECT
       # ============================================================
       - name: Initialize Android project
-        run: npx tauri android init
+        run: |
+          npx tauri android init
 
       - name: Prepare Android project
         run: |
@@ -214,13 +219,18 @@ jobs:
             android.permission.MODIFY_AUDIO_SETTINGS \
             android.permission.POST_NOTIFICATIONS
           do
-            if ! grep -qF "$PERMISSION" "$MANIFEST"; then
+            if ! grep -qF \
+              "$PERMISSION" \
+              "$MANIFEST"
+            then
               sed -i \
                 "/<manifest/a\\    <uses-permission android:name=\"$PERMISSION\" />" \
                 "$MANIFEST"
             fi
 
-            grep -qF "$PERMISSION" "$MANIFEST" || exit 1
+            grep -qF \
+              "$PERMISSION" \
+              "$MANIFEST" || exit 1
           done
 
           if ! grep -qF \
@@ -237,36 +247,60 @@ jobs:
             "$MANIFEST" || exit 1
 
           MAIN_SRC="src-tauri/mobile/android/MainActivity.kt"
+
           MAIN_DST="src-tauri/gen/android/app/src/main/java/com/deepstudent/app/MainActivity.kt"
 
           test -f "$MAIN_SRC" || exit 1
-          test -d "$(dirname "$MAIN_DST")" || exit 1
 
-          cp "$MAIN_SRC" "$MAIN_DST"
+          test -d \
+            "$(dirname "$MAIN_DST")" \
+            || exit 1
 
-          cmp -s "$MAIN_SRC" "$MAIN_DST" || exit 1
+          cp \
+            "$MAIN_SRC" \
+            "$MAIN_DST"
+
+          cmp -s \
+            "$MAIN_SRC" \
+            "$MAIN_DST" \
+            || exit 1
 
           INSTALLER_SRC="src-tauri/mobile/android/ApkInstallerPlugin.kt"
+
           INSTALLER_DST="src-tauri/gen/android/app/src/main/java/com/deepstudent/app/ApkInstallerPlugin.kt"
 
-          test -f "$INSTALLER_SRC" || exit 1
+          test -f \
+            "$INSTALLER_SRC" \
+            || exit 1
 
-          cp "$INSTALLER_SRC" "$INSTALLER_DST"
+          cp \
+            "$INSTALLER_SRC" \
+            "$INSTALLER_DST"
 
           cmp -s \
             "$INSTALLER_SRC" \
-            "$INSTALLER_DST" || exit 1
+            "$INSTALLER_DST" \
+            || exit 1
 
           XML_SRC="src-tauri/mobile/android/res/xml/file_paths.xml"
+
           XML_DST="src-tauri/gen/android/app/src/main/res/xml/file_paths.xml"
 
-          test -f "$XML_SRC" || exit 1
+          test -f \
+            "$XML_SRC" \
+            || exit 1
 
-          mkdir -p "$(dirname "$XML_DST")"
+          mkdir -p \
+            "$(dirname "$XML_DST")"
 
-          cp "$XML_SRC" "$XML_DST"
+          cp \
+            "$XML_SRC" \
+            "$XML_DST"
 
-          cmp -s "$XML_SRC" "$XML_DST" || exit 1
+          cmp -s \
+            "$XML_SRC" \
+            "$XML_DST" \
+            || exit 1
 
           if ! grep -qF \
             'androidx.core.content.FileProvider' \
@@ -281,19 +315,21 @@ jobs:
 
           grep -qF \
             'androidx.core.content.FileProvider' \
-            "$MANIFEST" || exit 1
+            "$MANIFEST" \
+            || exit 1
 
-          echo "✅ Android project prepared"
+          echo "Android project prepared"
 
       # ============================================================
       # OFFICIAL ANDROID ICONS
       # ============================================================
-      - name: Copy custom Android icons
+      - name: Copy Android icons
         run: |
           ICONS_SRC="src-tauri/icons/android"
           RES_DST="src-tauri/gen/android/app/src/main/res"
 
           if [ -d "$ICONS_SRC" ]; then
+
             for density in \
               mipmap-mdpi \
               mipmap-hdpi \
@@ -301,8 +337,12 @@ jobs:
               mipmap-xxhdpi \
               mipmap-xxxhdpi
             do
-              if [ -d "$ICONS_SRC/$density" ]; then
-                mkdir -p "$RES_DST/$density"
+              if [ -d \
+                "$ICONS_SRC/$density" \
+              ]; then
+
+                mkdir -p \
+                  "$RES_DST/$density"
 
                 cp -f \
                   "$ICONS_SRC/$density/"* \
@@ -310,8 +350,12 @@ jobs:
               fi
             done
 
-            if [ -d "$ICONS_SRC/mipmap-anydpi-v26" ]; then
-              mkdir -p "$RES_DST/mipmap-anydpi-v26"
+            if [ -d \
+              "$ICONS_SRC/mipmap-anydpi-v26" \
+            ]; then
+
+              mkdir -p \
+                "$RES_DST/mipmap-anydpi-v26"
 
               cp -f \
                 "$ICONS_SRC/mipmap-anydpi-v26/"* \
@@ -321,7 +365,9 @@ jobs:
             if [ -f \
               "$ICONS_SRC/values/ic_launcher_background.xml" \
             ]; then
-              mkdir -p "$RES_DST/values"
+
+              mkdir -p \
+                "$RES_DST/values"
 
               cp -f \
                 "$ICONS_SRC/values/ic_launcher_background.xml" \
@@ -335,7 +381,7 @@ jobs:
               "$RES_DST/drawable/ic_launcher_background.xml"
           fi
 
-          echo "✅ Android icons ready"
+          echo "Android icons ready"
 
       # ============================================================
       # PDF SUPPORT
@@ -349,7 +395,9 @@ jobs:
           PDFIUM="src-tauri/resources/pdfium/libpdfium_android_arm64.so"
 
           if [ ! -f "$PDFIUM" ]; then
-            bash scripts/download-pdfium.sh android-arm64
+            bash \
+              scripts/download-pdfium.sh \
+              android-arm64
           fi
 
           test -f "$PDFIUM" || {
@@ -357,14 +405,18 @@ jobs:
             exit 1
           }
 
-          cp "$PDFIUM" "$JNILIBS/libpdfium.so"
+          cp \
+            "$PDFIUM" \
+            "$JNILIBS/libpdfium.so"
 
-          test -f "$JNILIBS/libpdfium.so" || exit 1
+          test -f \
+            "$JNILIBS/libpdfium.so" \
+            || exit 1
 
-          echo "✅ PDFium bundled"
+          echo "PDFium bundled"
 
       # ============================================================
-      # NDK
+      # NDK COMPILER
       # ============================================================
       - name: Configure Android compiler
         run: |
@@ -401,8 +453,8 @@ jobs:
       # ============================================================
       # BUILD
       #
-      # mobile-slim is the SAME Android production feature profile
-      # used by Deep Student's official Android workflow.
+      # mobile-slim is Deep Student's official Android
+      # production feature profile.
       # ============================================================
       - name: Build APK
         env:
@@ -425,12 +477,13 @@ jobs:
               --features mobile-slim
 
       # ============================================================
-      # SIGN
+      # SIGN APK
       # ============================================================
       - name: Sign APK
         run: |
           UNSIGNED_APK=$(
-            find src-tauri/gen/android \
+            find \
+              src-tauri/gen/android \
               -name "*-unsigned.apk" \
               -type f \
               | head -1
@@ -442,14 +495,17 @@ jobs:
             find \
               src-tauri/gen/android \
               -name "*.apk" \
-              -type f || true
+              -type f \
+              || true
 
             exit 1
           fi
 
-          echo "Found APK: $UNSIGNED_APK"
+          echo \
+            "Found APK: $UNSIGNED_APK"
 
-          keytool -genkeypair \
+          keytool \
+            -genkeypair \
             -noprompt \
             -keystore /tmp/deepstudent.keystore \
             -storepass android \
@@ -469,7 +525,8 @@ jobs:
             "$UNSIGNED_APK" \
             /tmp/aligned.apk
 
-          "${TOOLS}/apksigner" sign \
+          "${TOOLS}/apksigner" \
+            sign \
             --ks /tmp/deepstudent.keystore \
             --ks-key-alias deepstudent \
             --ks-pass pass:android \
@@ -477,7 +534,8 @@ jobs:
             --in /tmp/aligned.apk \
             --out /tmp/DeepStudent-patched-arm64.apk
 
-          "${TOOLS}/apksigner" verify \
+          "${TOOLS}/apksigner" \
+            verify \
             --print-certs \
             /tmp/DeepStudent-patched-arm64.apk
 
@@ -492,7 +550,9 @@ jobs:
             "libdeep_student_lib.so size: ${SO_SIZE:-unknown}"
 
           if [ -z "$SO_SIZE" ]; then
-            echo "Deep Student native library missing"
+            echo \
+              "Deep Student native library missing"
+
             exit 1
           fi
 
@@ -503,7 +563,8 @@ jobs:
             exit 1
           fi
 
-          mkdir -p android-output
+          mkdir -p \
+            android-output
 
           VERSION=$(
             node -e \
@@ -514,12 +575,13 @@ jobs:
             /tmp/DeepStudent-patched-arm64.apk \
             "android-output/DeepStudent-v${VERSION}-patched-arm64.apk"
 
-          echo "✅ APK signed"
+          echo "APK signed"
 
-          ls -lh android-output/
+          ls -lh \
+            android-output/
 
       # ============================================================
-      # ARTIFACT
+      # UPLOAD APK
       # ============================================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
