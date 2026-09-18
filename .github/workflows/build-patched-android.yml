@@ -1,0 +1,529 @@
+name: Build Patched Android APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 210
+
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: "z"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      GRADLE_OPTS: -Dorg.gradle.daemon=false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ============================================================
+      # ANDROID TEXTBOX FIX
+      # ============================================================
+      - name: Patch Android composer IME bug
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path(
+              "src/features/chat/components/input-bar/ComposerTextarea.tsx"
+          )
+
+          source = path.read_text(encoding="utf-8")
+
+          import_anchor = "import { cn } from '@/lib/utils';\n"
+          android_import = "import { isAndroid } from '@/utils/platform';\n"
+
+          if android_import not in source:
+              if import_anchor not in source:
+                  raise SystemExit(
+                      "Could not find ComposerTextarea import anchor"
+                  )
+
+              source = source.replace(
+                  import_anchor,
+                  import_anchor + android_import,
+                  1,
+              )
+
+          old = """            if (!isComposingRef.current || !isMobile) {
+              onInputChange(e.target.value);
+            }"""
+
+          new = """            if (!isComposingRef.current || !isMobile || isAndroid()) {
+              onInputChange(e.target.value);
+            }"""
+
+          if old in source:
+              source = source.replace(old, new, 1)
+
+          elif new in source:
+              print("Android IME patch already present")
+
+          else:
+              raise SystemExit(
+                  "Expected ComposerTextarea IME block was not found"
+              )
+
+          path.write_text(source, encoding="utf-8")
+
+          print("Android composer IME patch applied")
+          PY
+
+      - name: Verify Android textbox patch
+        run: |
+          grep -q \
+            "import { isAndroid } from '@/utils/platform';" \
+            src/features/chat/components/input-bar/ComposerTextarea.tsx
+
+          grep -q \
+            "if (!isComposingRef.current || !isMobile || isAndroid())" \
+            src/features/chat/components/input-bar/ComposerTextarea.tsx
+
+          echo "✅ Android textbox patch verified"
+
+      # ============================================================
+      # BUILD ENVIRONMENT
+      # ============================================================
+      - name: Free disk space
+        run: |
+          echo "=== BEFORE ==="
+          df -h /
+
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/share/swift \
+            /usr/local/lib/android/sdk/ndk \
+            /usr/local/share/powershell \
+            /usr/local/share/chromium \
+            /usr/local/graalvm \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /opt/hostedtoolcache/go \
+            /opt/hostedtoolcache/Python \
+            /opt/hostedtoolcache/Ruby || true
+
+          sudo docker image prune --all --force || true
+
+          echo "=== AFTER ==="
+          df -h /
+
+      - name: Add swap
+        run: |
+          if swapon --show --noheadings | grep -q .; then
+            echo "Swap already enabled"
+          else
+            sudo fallocate -l 12G /swapfile || \
+              sudo dd if=/dev/zero of=/swapfile \
+              bs=1M count=12288 status=progress
+
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+
+            sudo swapon /swapfile || true
+          fi
+
+          free -h
+          swapon --show || true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        run: |
+          yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" \
+            "ndk;27.0.12077973" \
+            "build-tools;35.0.0" \
+            "platforms;android-35"
+
+          echo \
+            "NDK_HOME=${ANDROID_HOME}/ndk/27.0.12077973" \
+            >> "$GITHUB_ENV"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          shared-key: deepstudent-android-mobile-slim
+          cache-on-failure: true
+
+      # ============================================================
+      # DEPENDENCIES
+      # ============================================================
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Refresh Cargo metadata
+        run: |
+          cd src-tauri
+          cargo metadata --format-version 1 > /dev/null
+          cd ..
+
+      - name: Generate third-party notices
+        run: npm run licenses:generate
+
+      - name: Generate version information
+        run: node scripts/generate-version.mjs
+
+      # ============================================================
+      # ANDROID PROJECT
+      # ============================================================
+      - name: Initialize Android project
+        run: npx tauri android init
+
+      - name: Prepare Android project
+        run: |
+          MANIFEST="src-tauri/gen/android/app/src/main/AndroidManifest.xml"
+
+          test -f "$MANIFEST" || {
+            echo "AndroidManifest.xml missing"
+            exit 1
+          }
+
+          for PERMISSION in \
+            android.permission.RECORD_AUDIO \
+            android.permission.MODIFY_AUDIO_SETTINGS \
+            android.permission.POST_NOTIFICATIONS
+          do
+            if ! grep -qF "$PERMISSION" "$MANIFEST"; then
+              sed -i \
+                "/<manifest/a\\    <uses-permission android:name=\"$PERMISSION\" />" \
+                "$MANIFEST"
+            fi
+
+            grep -qF "$PERMISSION" "$MANIFEST" || exit 1
+          done
+
+          if ! grep -qF \
+            'android:windowSoftInputMode' \
+            "$MANIFEST"
+          then
+            sed -i \
+              's|android:launchMode="singleTask"|android:launchMode="singleTask" android:windowSoftInputMode="adjustResize"|' \
+              "$MANIFEST"
+          fi
+
+          grep -qF \
+            'android:windowSoftInputMode="adjustResize"' \
+            "$MANIFEST" || exit 1
+
+          MAIN_SRC="src-tauri/mobile/android/MainActivity.kt"
+          MAIN_DST="src-tauri/gen/android/app/src/main/java/com/deepstudent/app/MainActivity.kt"
+
+          test -f "$MAIN_SRC" || exit 1
+          test -d "$(dirname "$MAIN_DST")" || exit 1
+
+          cp "$MAIN_SRC" "$MAIN_DST"
+
+          cmp -s "$MAIN_SRC" "$MAIN_DST" || exit 1
+
+          INSTALLER_SRC="src-tauri/mobile/android/ApkInstallerPlugin.kt"
+          INSTALLER_DST="src-tauri/gen/android/app/src/main/java/com/deepstudent/app/ApkInstallerPlugin.kt"
+
+          test -f "$INSTALLER_SRC" || exit 1
+
+          cp "$INSTALLER_SRC" "$INSTALLER_DST"
+
+          cmp -s \
+            "$INSTALLER_SRC" \
+            "$INSTALLER_DST" || exit 1
+
+          XML_SRC="src-tauri/mobile/android/res/xml/file_paths.xml"
+          XML_DST="src-tauri/gen/android/app/src/main/res/xml/file_paths.xml"
+
+          test -f "$XML_SRC" || exit 1
+
+          mkdir -p "$(dirname "$XML_DST")"
+
+          cp "$XML_SRC" "$XML_DST"
+
+          cmp -s "$XML_SRC" "$XML_DST" || exit 1
+
+          if ! grep -qF \
+            'androidx.core.content.FileProvider' \
+            "$MANIFEST"
+          then
+            PROVIDER_LINE='<provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.fileprovider" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" /></provider>'
+
+            sed -i \
+              "s|</application>|${PROVIDER_LINE}</application>|" \
+              "$MANIFEST"
+          fi
+
+          grep -qF \
+            'androidx.core.content.FileProvider' \
+            "$MANIFEST" || exit 1
+
+          echo "✅ Android project prepared"
+
+      # ============================================================
+      # OFFICIAL ANDROID ICONS
+      # ============================================================
+      - name: Copy custom Android icons
+        run: |
+          ICONS_SRC="src-tauri/icons/android"
+          RES_DST="src-tauri/gen/android/app/src/main/res"
+
+          if [ -d "$ICONS_SRC" ]; then
+            for density in \
+              mipmap-mdpi \
+              mipmap-hdpi \
+              mipmap-xhdpi \
+              mipmap-xxhdpi \
+              mipmap-xxxhdpi
+            do
+              if [ -d "$ICONS_SRC/$density" ]; then
+                mkdir -p "$RES_DST/$density"
+
+                cp -f \
+                  "$ICONS_SRC/$density/"* \
+                  "$RES_DST/$density/"
+              fi
+            done
+
+            if [ -d "$ICONS_SRC/mipmap-anydpi-v26" ]; then
+              mkdir -p "$RES_DST/mipmap-anydpi-v26"
+
+              cp -f \
+                "$ICONS_SRC/mipmap-anydpi-v26/"* \
+                "$RES_DST/mipmap-anydpi-v26/"
+            fi
+
+            if [ -f \
+              "$ICONS_SRC/values/ic_launcher_background.xml" \
+            ]; then
+              mkdir -p "$RES_DST/values"
+
+              cp -f \
+                "$ICONS_SRC/values/ic_launcher_background.xml" \
+                "$RES_DST/values/"
+            fi
+
+            rm -f \
+              "$RES_DST/drawable-v24/ic_launcher_foreground.xml"
+
+            rm -f \
+              "$RES_DST/drawable/ic_launcher_background.xml"
+          fi
+
+          echo "✅ Android icons ready"
+
+      # ============================================================
+      # PDF SUPPORT
+      # ============================================================
+      - name: Bundle PDFium
+        run: |
+          JNILIBS="src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a"
+
+          mkdir -p "$JNILIBS"
+
+          PDFIUM="src-tauri/resources/pdfium/libpdfium_android_arm64.so"
+
+          if [ ! -f "$PDFIUM" ]; then
+            bash scripts/download-pdfium.sh android-arm64
+          fi
+
+          test -f "$PDFIUM" || {
+            echo "PDFium missing"
+            exit 1
+          }
+
+          cp "$PDFIUM" "$JNILIBS/libpdfium.so"
+
+          test -f "$JNILIBS/libpdfium.so" || exit 1
+
+          echo "✅ PDFium bundled"
+
+      # ============================================================
+      # NDK
+      # ============================================================
+      - name: Configure Android compiler
+        run: |
+          NDK="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
+
+          test -x \
+            "${NDK}/bin/aarch64-linux-android21-clang" \
+            || exit 1
+
+          test -x \
+            "${NDK}/bin/aarch64-linux-android21-clang++" \
+            || exit 1
+
+          test -x \
+            "${NDK}/bin/llvm-ar" \
+            || exit 1
+
+          echo \
+            "CC_aarch64_linux_android=${NDK}/bin/aarch64-linux-android21-clang" \
+            >> "$GITHUB_ENV"
+
+          echo \
+            "CXX_aarch64_linux_android=${NDK}/bin/aarch64-linux-android21-clang++" \
+            >> "$GITHUB_ENV"
+
+          echo \
+            "AR_aarch64_linux_android=${NDK}/bin/llvm-ar" \
+            >> "$GITHUB_ENV"
+
+          echo \
+            "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${NDK}/bin/aarch64-linux-android21-clang" \
+            >> "$GITHUB_ENV"
+
+      # ============================================================
+      # BUILD
+      #
+      # mobile-slim is the SAME Android production feature profile
+      # used by Deep Student's official Android workflow.
+      # ============================================================
+      - name: Build APK
+        env:
+          SILICONFLOW_BUILTIN_TEXT_KEY: ${{ secrets.SILICONFLOW_BUILTIN_TEXT_KEY }}
+          SILICONFLOW_BUILTIN_VISION_KEY: ${{ secrets.SILICONFLOW_BUILTIN_VISION_KEY }}
+          SILICONFLOW_BUILTIN_EMBED_KEY: ${{ secrets.SILICONFLOW_BUILTIN_EMBED_KEY }}
+
+        run: |
+          timeout \
+            --signal=TERM \
+            --kill-after=60s \
+            165m \
+            npx tauri android build \
+              --target aarch64 \
+              --apk \
+              --ci \
+              -- \
+              --locked \
+              --no-default-features \
+              --features mobile-slim
+
+      # ============================================================
+      # SIGN
+      # ============================================================
+      - name: Sign APK
+        run: |
+          UNSIGNED_APK=$(
+            find src-tauri/gen/android \
+              -name "*-unsigned.apk" \
+              -type f \
+              | head -1
+          )
+
+          if [ -z "$UNSIGNED_APK" ]; then
+            echo "Unsigned APK not found"
+
+            find \
+              src-tauri/gen/android \
+              -name "*.apk" \
+              -type f || true
+
+            exit 1
+          fi
+
+          echo "Found APK: $UNSIGNED_APK"
+
+          keytool -genkeypair \
+            -noprompt \
+            -keystore /tmp/deepstudent.keystore \
+            -storepass android \
+            -keypass android \
+            -alias deepstudent \
+            -dname \
+              "CN=DeepStudent Patched,O=Local Build,C=US" \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000
+
+          TOOLS="${ANDROID_HOME}/build-tools/35.0.0"
+
+          "${TOOLS}/zipalign" \
+            -P 16 \
+            -v 4 \
+            "$UNSIGNED_APK" \
+            /tmp/aligned.apk
+
+          "${TOOLS}/apksigner" sign \
+            --ks /tmp/deepstudent.keystore \
+            --ks-key-alias deepstudent \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --in /tmp/aligned.apk \
+            --out /tmp/DeepStudent-patched-arm64.apk
+
+          "${TOOLS}/apksigner" verify \
+            --print-certs \
+            /tmp/DeepStudent-patched-arm64.apk
+
+          SO_SIZE=$(
+            unzip -l \
+              /tmp/DeepStudent-patched-arm64.apk \
+              | awk \
+                '/libdeep_student_lib\.so/ {print $1; exit}'
+          )
+
+          echo \
+            "libdeep_student_lib.so size: ${SO_SIZE:-unknown}"
+
+          if [ -z "$SO_SIZE" ]; then
+            echo "Deep Student native library missing"
+            exit 1
+          fi
+
+          if [ "$SO_SIZE" -gt 262144000 ]; then
+            echo \
+              "Native library exceeds safe 250MB release limit"
+
+            exit 1
+          fi
+
+          mkdir -p android-output
+
+          VERSION=$(
+            node -e \
+              "console.log(JSON.parse(require('fs').readFileSync('package.json','utf8')).version)"
+          )
+
+          cp \
+            /tmp/DeepStudent-patched-arm64.apk \
+            "android-output/DeepStudent-v${VERSION}-patched-arm64.apk"
+
+          echo "✅ APK signed"
+
+          ls -lh android-output/
+
+      # ============================================================
+      # ARTIFACT
+      # ============================================================
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeepStudent-patched-arm64
+          path: android-output/*.apk
+          if-no-files-found: error
