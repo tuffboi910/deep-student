@@ -11,13 +11,14 @@
  * 语音插入与聚焦控制等父级逻辑都依赖这些 refs。
  */
 
-import React, { useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import type { UseSkillSlashCommandsReturn } from './SkillSlashPopover';
 import { shouldHandleSkillSlashKey } from './SkillSlashPopover';
 import { shouldHandleModelMentionKey } from './ModelMentionPopover';
 import type { ModelMentionState, ModelMentionActions } from './types';
 import { INPUT_BAR_CONFIG } from './inputBarConfig';
 import { cn } from '@/lib/utils';
+import { isAndroidWebView } from '@/utils/platform';
 
 export interface ComposerTextareaProps {
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
@@ -79,6 +80,12 @@ export const ComposerTextarea: React.FC<ComposerTextareaProps> = ({
   modelMentionState,
   modelMentionActions,
 }) => {
+  // Chromium's Android WebView owns the live value/selection while an IME is composing.
+  // Writing React's controlled `value` back during that window makes Chromium rebuild the
+  // editor InputConnection. Samsung Keyboard can then keep sending composing operations to
+  // the connection that was just deactivated. Keep the Android WebView DOM editor as the
+  // authority and only mirror external value changes when they actually differ.
+  const useAndroidImeDomValue = isAndroidWebView();
   // 🔧 IME 合成态追踪：防止 WKWebView 中文输入法重复追加文本
   const isComposingRef = useRef(false);
   // 🔧 Safari/WebKit 时序修复：compositionend 先于确认 Enter 的 keydown 触发，
@@ -93,6 +100,34 @@ export const ComposerTextarea: React.FC<ComposerTextareaProps> = ({
       }
     };
   }, []);
+
+  useLayoutEffect(() => {
+    if (!useAndroidImeDomValue || isComposingRef.current) return;
+
+    const textarea = textareaRef.current;
+    if (!textarea || textarea.value === inputValue) return;
+
+    const selectionStart = textarea.selectionStart;
+    const selectionEnd = textarea.selectionEnd;
+    textarea.value = inputValue;
+
+    if (document.activeElement === textarea) {
+      const length = inputValue.length;
+      textarea.setSelectionRange(
+        Math.min(selectionStart, length),
+        Math.min(selectionEnd, length),
+      );
+    }
+
+    adjustTextareaHeight();
+    scrollCaretIntoView();
+  }, [
+    adjustTextareaHeight,
+    inputValue,
+    scrollCaretIntoView,
+    textareaRef,
+    useAndroidImeDomValue,
+  ]);
 
   // IME 合成态检测
   // 覆盖三类场景：1) 标准 isComposing；2) Windows/旧 WebView 的 keyCode 229；
@@ -140,7 +175,9 @@ export const ComposerTextarea: React.FC<ComposerTextareaProps> = ({
           data-testid="input-bar-v2-textarea"
           ref={textareaRef}
           aria-label={placeholder}
-          value={inputValue}
+          {...(useAndroidImeDomValue
+            ? { defaultValue: inputValue }
+            : { value: inputValue })}
           onCompositionStart={() => {
             isComposingRef.current = true;
           }}
@@ -166,8 +203,9 @@ export const ComposerTextarea: React.FC<ComposerTextareaProps> = ({
             }, 0);
           }}
           onChange={(e) => {
-            // 🔧 IME 合成期间跳过 store 更新，仅移动端 WKWebView 需要（桌面端受控组件会阻止输入）
-            if (!isComposingRef.current || !isMobile) {
+            // Android WebView is deliberately DOM-owned, so mirroring the value to the store
+            // cannot write back into (and invalidate) the active InputConnection.
+            if (useAndroidImeDomValue || !isComposingRef.current || !isMobile) {
               onInputChange(e.target.value);
             }
             setTimeout(() => {
