@@ -21,15 +21,68 @@ jobs:
       GRADLE_OPTS: -Dorg.gradle.daemon=false
 
     steps:
+      # ============================================================
+      # CLEAN DEEP STUDENT 0.9.62 BASELINE
+      # ============================================================
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: 840a578b2f38ac71541aad688cb610f160638fe1
-  
 
       # ============================================================
-      # ANDROID TEXTBOX FIX
+      # 0.9.62 FSRS COMPILE FIX
+      #
+      # The clean release commit is missing the newly-required
+      # learn_ahead_minutes field in FsrsSchedulerConfigUpdate.
+      # The upstream post-release fix sets it to None.
+      # ============================================================
+      - name: Patch FSRS compile mismatch
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path(
+              "src-tauri/src/chat_v2/tools/fsrs_settings_executor.rs"
+          )
+
+          source = path.read_text(encoding="utf-8")
+
+          old = """        let update = FsrsSchedulerConfigUpdate {
+              new_per_day: request.new_per_day,"""
+
+          new = """        let update = FsrsSchedulerConfigUpdate {
+              learn_ahead_minutes: None,
+              new_per_day: request.new_per_day,"""
+
+          if old not in source:
+              if "learn_ahead_minutes: None," in source:
+                  print("FSRS compile fix already present")
+              else:
+                  raise SystemExit(
+                      "FSRS patch failed: expected initializer not found"
+                  )
+          else:
+              source = source.replace(old, new, 1)
+
+              path.write_text(
+                  source,
+                  encoding="utf-8",
+              )
+
+              print("FSRS compile fix applied successfully")
+          PY
+
+      - name: Verify FSRS compile fix
+        run: |
+          grep -Fq \
+            'learn_ahead_minutes: None,' \
+            src-tauri/src/chat_v2/tools/fsrs_settings_executor.rs
+
+          echo "FSRS compile fix verified"
+
+      # ============================================================
+      # ANDROID TEXTBOX / IME FIX
       # ============================================================
       - name: Patch Android composer IME bug
         run: |
@@ -62,18 +115,24 @@ jobs:
           )
 
           if count != 1:
-              raise SystemExit(
-                  f"Android IME patch failed: expected 1 block, found {count}"
+              if (
+                  "!isMobile || /Android/i.test(navigator.userAgent)"
+                  in source
+              ):
+                  print("Android IME patch already present")
+              else:
+                  raise SystemExit(
+                      f"Android IME patch failed: expected 1 block, found {count}"
+                  )
+          else:
+              path.write_text(
+                  patched,
+                  encoding="utf-8",
               )
 
-          path.write_text(
-              patched,
-              encoding="utf-8",
-          )
-
-          print(
-              "Android IME textbox patch applied successfully"
-          )
+              print(
+                  "Android IME textbox patch applied successfully"
+              )
           PY
 
       - name: Verify Android textbox patch
@@ -187,9 +246,11 @@ jobs:
       - name: Refresh Cargo metadata
         run: |
           cd src-tauri
+
           cargo metadata \
             --format-version 1 \
             > /dev/null
+
           cd ..
 
       - name: Generate third-party notices
